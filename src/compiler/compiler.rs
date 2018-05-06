@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cache::{Cache, CacheWrite, Storage};
+use crate::cache::{
+    Cache,
+    CacheWrite,
+    Storage,
+};
+use crate::compiler::msvc;
 use crate::compiler::c::{CCompiler, CCompilerKind};
 use crate::compiler::clang::Clang;
-use crate::compiler::diab::Diab;
 use crate::compiler::gcc::GCC;
-use crate::compiler::msvc;
+use crate::compiler::nvcc::NVCC;
 use crate::compiler::msvc::MSVC;
 use crate::compiler::rust::{Rust, RustupProxy};
 use crate::dist;
@@ -26,7 +30,7 @@ use crate::dist::pkg;
 use crate::mock_command::{exit_status, CommandChild, CommandCreatorSync, RunCommand};
 use crate::util::{fmt_duration_as_secs, ref_env, run_input_output};
 use filetime::FileTime;
-use futures::Future;
+use futures::{Future, IntoFuture};
 use futures_cpupool::CpuPool;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1021,7 +1025,18 @@ where
 {
     trace!("detect_c_compiler");
 
-    let test = b"#if defined(_MSC_VER) && defined(__clang__)
+    // The detection script doesn't work with NVCC, have to assume NVCC executable name
+    // ends with "nvcc" or "nvcc.exe" instead.
+    let executable_str = executable.clone().into_os_string().into_string().unwrap();
+    debug!("executable: {}", executable_str);
+    if executable_str.ends_with("nvcc") || executable_str.ends_with("nvcc.exe") {
+        debug!("Found NVCC");
+        return Box::new(CCompiler::new(NVCC, executable, &pool)
+                        .map(|c| Some(Box::new(c) as Box<Compiler<T>>)));
+    }
+
+    // Otherwise, check if compiler is one of MSVC / Clang / GCC
+    let test = b"##if defined(_MSC_VER) && defined(__clang__)
 msvc-clang
 #elif defined(_MSC_VER)
 msvc
