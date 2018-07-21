@@ -153,6 +153,8 @@ pub enum CCompilerKind {
     MSVC,
     /// NVCC
     NVCC,
+    /// Heterogeneous Compute Compiler
+    HCC
 }
 
 /// An interface to a specific C compiler.
