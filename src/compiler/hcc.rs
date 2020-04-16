@@ -1,17 +1,19 @@
 #![allow(unused_imports,dead_code,unused_variables)]
 
-use ::compiler::{
+use crate::compiler::{
     gcc,
     Cacheable,
+    CompileCommand,
     CompilerArguments,
     write_temp_file,
 };
-use compiler::args::*;
-use compiler::c::{CCompilerImpl, CCompilerKind, Language, ParsedArguments};
-use compiler::gcc::GCCArgAttribute::*;
+use crate::compiler::args::*;
+use crate::compiler::c::{CCompilerImpl, CCompilerKind, Language, ParsedArguments};
+use crate::compiler::gcc::ArgData::*;
+use crate::dist;
 use futures::future::{self, Future};
 use futures_cpupool::CpuPool;
-use mock_command::{
+use crate::mock_command::{
     CommandCreator,
     CommandCreatorSync,
     RunCommand,
@@ -24,9 +26,9 @@ use std::io::{
 };
 use std::path::Path;
 use std::process;
-use util::{run_input_output, OsStrExt};
+use crate::util::{run_input_output, OsStrExt};
 
-use errors::*;
+use crate::errors::*;
 
 /// A unit struct on which to implement `CCompilerImpl`.
 #[derive(Debug, Clone)]
@@ -41,32 +43,53 @@ impl CCompilerImpl for HCC {
         gcc::parse_arguments(arguments, cwd, (&gcc::ARGS[..], &ARGS[..]))
     }
 
-    fn preprocess<T>(&self,
-                     creator: &T,
-                     executable: &Path,
-                     parsed_args: &ParsedArguments,
-                     cwd: &Path,
-                     env_vars: &[(OsString, OsString)])
-                     -> SFuture<process::Output> where T: CommandCreatorSync
+    fn preprocess<T>(
+        &self,
+        creator: &T,
+        executable: &Path,
+        parsed_args: &ParsedArguments,
+        cwd: &Path,
+        env_vars: &[(OsString, OsString)],
+        may_dist: bool,
+        rewrite_includes_only: bool,
+    ) -> SFuture<process::Output>
+    where
+        T: CommandCreatorSync,
     {
-        gcc::preprocess(creator, executable, parsed_args, cwd, env_vars)
+        gcc::preprocess(
+            creator,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            may_dist,
+            self.kind(),
+            rewrite_includes_only,
+        )
     }
 
-    fn compile<T>(&self,
-                  creator: &T,
-                  executable: &Path,
-                  parsed_args: &ParsedArguments,
-                  cwd: &Path,
-                  env_vars: &[(OsString, OsString)])
-                  -> SFuture<(Cacheable, process::Output)>
-        where T: CommandCreatorSync
-    {
-        gcc::compile(creator, executable, parsed_args, cwd, env_vars)
+    fn generate_compile_commands(
+        &self,
+        path_transformer: &mut dist::PathTransformer,
+        executable: &Path,
+        parsed_args: &ParsedArguments,
+        cwd: &Path,
+        env_vars: &[(OsString, OsString)],
+        rewrite_includes_only: bool,
+    ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
+        gcc::generate_compile_commands(
+            path_transformer,
+            executable,
+            parsed_args,
+            cwd,
+            env_vars,
+            self.kind(),
+            rewrite_includes_only,
+        )
     }
 }
 
-static ARGS: [(ArgInfo, gcc::GCCArgAttribute); 3] = [
-    take_arg!("--amdgpu-target", String, Concatenated('='), PassThrough),
-    take_arg!("--driver-mode", String, Concatenated('='), PassThrough),
-    flag!("-hc", PassThrough)
-];
+counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
+    take_arg!("--amdgpu-target", OsString, Concatenated('='), PassThrough),
+    take_arg!("--driver-mode", OsString, Concatenated('='), PassThrough),
+]);

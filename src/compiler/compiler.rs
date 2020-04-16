@@ -20,6 +20,7 @@ use crate::cache::{
 use crate::compiler::msvc;
 use crate::compiler::c::{CCompiler, CCompilerKind};
 use crate::compiler::clang::Clang;
+use crate::compiler::diab::Diab;
 use crate::compiler::gcc::GCC;
 use crate::compiler::nvcc::NVCC;
 use crate::compiler::hcc::HCC;
@@ -31,7 +32,7 @@ use crate::dist::pkg;
 use crate::mock_command::{exit_status, CommandChild, CommandCreatorSync, RunCommand};
 use crate::util::{fmt_duration_as_secs, ref_env, run_input_output};
 use filetime::FileTime;
-use futures::{Future, IntoFuture};
+use futures::Future;
 use futures_cpupool::CpuPool;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1032,19 +1033,10 @@ where
     debug!("executable: {}", executable_str);
     if executable_str.ends_with("nvcc") || executable_str.ends_with("nvcc.exe") {
         debug!("Found NVCC");
-        return Box::new(CCompiler::new(NVCC, executable, &pool)
-                        .map(|c| Some(Box::new(c) as Box<Compiler<T>>)));
-    }
-
-    // The detection script doesn't work with clang-cl (it would say that it's msvc, which
-    // is not what we want), have to assume clang-cl executable name ends with "clang-cl"
-    // or "clang-cl.exe" instead.
-    let executable_str = executable.clone().into_os_string().into_string().unwrap();
-    debug!("executable: {}", executable_str);
-    if executable_str.ends_with("clang-cl") || executable_str.ends_with("clang-cl.exe") {
-        debug!("Found clang-cl");
-        return Box::new(CCompiler::new(ClangCl, executable, &pool)
-                        .map(|c| Some(Box::new(c) as Box<Compiler<T>>)));
+        return Box::new(
+            CCompiler::new(NVCC, executable, &pool)
+                .map(|c| Box::new(c) as Box<dyn Compiler<T>>),
+        );
     }
 
     // Otherwise, check if compiler is one of MSVC / Clang / GCC
