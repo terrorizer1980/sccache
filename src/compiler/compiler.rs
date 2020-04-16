@@ -1029,7 +1029,7 @@ where
 
     // The detection script doesn't work with NVCC, have to assume NVCC executable name
     // ends with "nvcc" or "nvcc.exe" instead.
-    let executable_str = executable.clone().into_os_string().into_string().unwrap();
+    let executable_str = executable.clone().into_os_string().into_string().unwrap().to_lowercase();
     debug!("executable: {}", executable_str);
     if executable_str.ends_with("nvcc") || executable_str.ends_with("nvcc.exe") {
         debug!("Found NVCC");
