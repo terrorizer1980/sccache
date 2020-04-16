@@ -125,8 +125,12 @@ where
         Language::ObjectiveCxx => "objective-c++",
     };
     let mut cmd = creator.clone().new_command_sync(executable);
-    cmd.arg("-E")
-        .arg(&parsed_args.input)
+    cmd.arg("-E");
+    if cfg!(windows) {
+        cmd.arg("-Xcompiler")
+            .arg("-EP");
+    }
+    cmd.arg(&parsed_args.input)
         .args(&parsed_args.preprocessor_args)
         .args(&parsed_args.common_args)
         .env_clear()
