@@ -203,6 +203,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-gencode", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("-maxrregcount", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("-std", OsString, CanBeSeparated('='), PassThrough),
+    take_arg!("--Werror", OsString, Separated, PassThrough),
 ]);
 
 // TODO: add some unit tests
