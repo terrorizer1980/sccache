@@ -193,6 +193,7 @@ pub fn generate_compile_commands(
 }
 
 counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
+    take_arg!("--Werror", OsString, Separated, PassThrough),
     take_arg!("--compiler-bindir", PathBuf, Separated, PassThroughPath),
     take_arg!("--compiler-options", OsString, Separated, PassThrough),
     take_arg!("--std", OsString, Separated, PassThrough),
@@ -203,7 +204,6 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("-gencode", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("-maxrregcount", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("-std", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("--Werror", OsString, Separated, PassThrough),
 ]);
 
 // TODO: add some unit tests
