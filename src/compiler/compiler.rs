@@ -22,7 +22,6 @@ use crate::compiler::c::{CCompiler, CCompilerKind};
 use crate::compiler::clang::Clang;
 use crate::compiler::diab::Diab;
 use crate::compiler::gcc::GCC;
-use crate::compiler::nvcc::NVCC;
 use crate::compiler::hcc::HCC;
 use crate::compiler::msvc::MSVC;
 use crate::compiler::nvcc::NVCC;

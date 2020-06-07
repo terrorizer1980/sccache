@@ -19,7 +19,7 @@ use crate::compiler::{
 };
 use crate::dist;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{run_input_output, OsStrExt};
+use crate::util::run_input_output;
 use futures::future::Future;
 use futures_cpupool::CpuPool;
 use local_encoding::{Encoder, Encoding};
@@ -448,18 +448,7 @@ pub fn parse_arguments(
     let mut show_includes = false;
     let mut xclangs: Vec<OsString> = vec![];
 
-    // First convert all `/foo` arguments to `-foo` to accept both styles
-    let it = arguments.iter().map(|i| {
-        if let Some(arg) = i.split_prefix("/") {
-            let mut dash = OsString::from("-");
-            dash.push(&arg);
-            dash
-        } else {
-            i.clone()
-        }
-    });
-
-    for arg in ArgsIter::new(it, &ARGS[..]) {
+    for arg in ArgsIter::new(arguments.iter().cloned(), (&ARGS[..], &SLASH_ARGS[..])) {
         let arg = try_or_cannot_cache!(arg, "argument parse");
         match arg.get_data() {
             Some(PassThrough) | Some(PassThroughWithPath(_)) | Some(PassThroughWithSuffix(_)) => {}

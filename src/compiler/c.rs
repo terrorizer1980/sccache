@@ -114,7 +114,7 @@ impl Language {
     pub fn from_file_name(file: &Path) -> Option<Self> {
         match file.extension().and_then(|e| e.to_str()) {
             Some("c") => Some(Language::C),
-            Some("C") | Some("cc") | Some("cpp") | Some("cxx") | Some("cu") => Some(Language::Cxx),
+            Some("C") | Some("cc") | Some("cpp") | Some("cxx") => Some(Language::Cxx),
             Some("m") => Some(Language::ObjectiveC),
             Some("mm") => Some(Language::ObjectiveCxx),
             Some("cu") => Some(Language::Cuda),

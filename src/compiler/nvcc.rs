@@ -118,7 +118,7 @@ impl CCompilerImpl for NVCC {
         cmd.arg("-E");
         if cfg!(windows) {
             cmd.arg("-Xcompiler=-EP");
-        else {
+        } else {
             cmd.arg("-Xcompiler=-P");
         }
         cmd.env_clear()
