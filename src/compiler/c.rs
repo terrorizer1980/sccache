@@ -161,7 +161,7 @@ pub enum CCompilerKind {
     /// NVCC
     NVCC,
     /// Heterogeneous Compute Compiler
-    HCC
+    HCC,
 }
 
 /// An interface to a specific C compiler.
