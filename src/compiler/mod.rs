@@ -24,6 +24,7 @@ mod gcc;
 mod nvcc;
 mod hcc;
 mod msvc;
+mod nvcc;
 mod rust;
 
 pub use crate::compiler::compiler::*;

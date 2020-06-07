@@ -25,6 +25,7 @@ use crate::compiler::gcc::GCC;
 use crate::compiler::nvcc::NVCC;
 use crate::compiler::hcc::HCC;
 use crate::compiler::msvc::MSVC;
+use crate::compiler::nvcc::NVCC;
 use crate::compiler::rust::{Rust, RustupProxy};
 use crate::dist;
 #[cfg(feature = "dist-client")]
@@ -38,7 +39,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
-#[cfg(any(feature = "dist-client", unix))]
+#[cfg(feature = "dist-client")]
 use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
@@ -47,7 +48,7 @@ use std::process::{self, Stdio};
 use std::str;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 use tokio_timer::Timeout;
 
 use crate::errors::*;
@@ -95,6 +96,7 @@ pub enum CompilerKind {
 impl CompilerKind {
     pub fn lang_kind(&self) -> String {
         match self {
+            CompilerKind::C(CCompilerKind::NVCC) => "CUDA",
             CompilerKind::C(_) => "C/C++",
             CompilerKind::Rust => "Rust",
         }
@@ -147,7 +149,7 @@ where
         &self,
         creator: T,
         cwd: PathBuf,
-        env_vars: &[(OsString,OsString)],
+        env_vars: &[(OsString, OsString)],
     ) -> SFuture<(PathBuf, FileTime)>;
 
     /// Create a clone of `Self` and puts it in a `Box`
@@ -255,28 +257,9 @@ where
                             out_pretty,
                             fmt_duration_as_secs(&duration)
                         );
-                        let mut stdout = Vec::new();
-                        let mut stderr = Vec::new();
-                        drop(entry.get_object("stdout", &mut stdout));
-                        drop(entry.get_object("stderr", &mut stderr));
-                        let write = pool.spawn_fn(move || {
-                            for (key, path) in &outputs {
-                                let dir = match path.parent() {
-                                    Some(d) => d,
-                                    None => bail!("Output file without a parent directory!"),
-                                };
-                                // Write the cache entry to a tempfile and then atomically
-                                // move it to its final location so that other rustc invocations
-                                // happening in parallel don't see a partially-written file.
-                                let mut tmp = NamedTempFile::new_in(dir)?;
-                                let mode = entry.get_object(&key, &mut tmp)?;
-                                tmp.persist(path)?;
-                                if let Some(mode) = mode {
-                                    set_file_mode(&path, mode)?;
-                                }
-                            }
-                            Ok(())
-                        });
+                        let stdout = entry.get_stdout();
+                        let stderr = entry.get_stderr();
+                        let write = entry.extract_objects(outputs, &pool);
                         let output = process::Output {
                             status: exit_status(0),
                             stdout,
@@ -354,30 +337,14 @@ where
                             out_pretty,
                             fmt_duration_as_secs(&duration)
                         );
-                        let write = pool.spawn_fn(move || -> Result<_> {
-                            let mut entry = CacheWrite::new();
-                            for (key, path) in &outputs {
-                                let mut f = File::open(&path)?;
-                                let mode = get_file_mode(&f)?;
-                                entry.put_object(key, &mut f, mode).chain_err(|| {
-                                    format!("failed to put object `{:?}` in zip", path)
-                                })?;
-                            }
-                            Ok(entry)
-                        });
+                        let write = CacheWrite::from_objects(outputs, &pool);
                         let write = write.chain_err(|| "failed to zip up compiler outputs");
                         let o = out_pretty.clone();
                         Box::new(
                             write
                                 .and_then(move |mut entry| {
-                                    if !compiler_result.stdout.is_empty() {
-                                        let mut stdout = &compiler_result.stdout[..];
-                                        entry.put_object("stdout", &mut stdout, None)?;
-                                    }
-                                    if !compiler_result.stderr.is_empty() {
-                                        let mut stderr = &compiler_result.stderr[..];
-                                        entry.put_object("stderr", &mut stderr, None)?;
-                                    }
+                                    entry.put_stdout(&compiler_result.stdout)?;
+                                    entry.put_stderr(&compiler_result.stderr)?;
 
                                     // Try to finish storing the newly-written cache
                                     // entry. We'll get the result back elsewhere.
@@ -819,31 +786,6 @@ impl PartialEq<CompileResult> for CompileResult {
     }
 }
 
-#[cfg(unix)]
-fn get_file_mode(file: &File) -> Result<Option<u32>> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(Some(file.metadata()?.mode()))
-}
-
-#[cfg(windows)]
-fn get_file_mode(_file: &File) -> Result<Option<u32>> {
-    Ok(None)
-}
-
-#[cfg(unix)]
-fn set_file_mode(path: &Path, mode: u32) -> Result<()> {
-    use std::fs::Permissions;
-    use std::os::unix::fs::PermissionsExt;
-    let p = Permissions::from_mode(mode);
-    fs::set_permissions(path, p)?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn set_file_mode(_path: &Path, _mode: u32) -> Result<()> {
-    Ok(())
-}
-
 /// Can this result be stored in cache?
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Cacheable {
@@ -885,7 +827,6 @@ pub fn write_temp_file(
     .chain_err(|| "failed to write temporary file")
 }
 
-
 /// If `executable` is a known compiler, return `Some(Box<Compiler>)`.
 fn detect_compiler<T>(
     creator: T,
@@ -905,7 +846,9 @@ where
         None => return f_err("could not determine compiler kind"),
         Some(f) => f,
     };
-    let rustc_vv = if filename.to_string_lossy().to_lowercase() == "rustc" {
+    let filename = filename.to_string_lossy().to_lowercase();
+
+    let rustc_vv = if filename == "rustc" || filename == "clippy-driver" {
         // Sanity check that it's really rustc.
         let executable = executable.to_path_buf();
         let mut child = creator.clone().new_command_sync(executable);
@@ -922,7 +865,6 @@ where
     } else {
         f_ok(None)
     };
-
 
     let creator1 = creator.clone();
     let creator2 = creator.clone();
@@ -1192,7 +1134,8 @@ mod test {
         );
         let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &pool, None)
             .wait()
-            .unwrap().0;
+            .unwrap()
+            .0;
         assert_eq!(CompilerKind::C(CCompilerKind::GCC), c.kind());
     }
 
@@ -1207,7 +1150,8 @@ mod test {
         );
         let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &pool, None)
             .wait()
-            .unwrap().0;
+            .unwrap()
+            .0;
         assert_eq!(CompilerKind::C(CCompilerKind::Clang), c.kind());
     }
 
@@ -1236,8 +1180,25 @@ mod test {
         );
         let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &pool, None)
             .wait()
-            .unwrap().0;
+            .unwrap()
+            .0;
         assert_eq!(CompilerKind::C(CCompilerKind::MSVC), c.kind());
+    }
+
+    #[test]
+    fn test_detect_compiler_kind_nvcc() {
+        let f = TestFixture::new();
+        let creator = new_creator();
+        let pool = CpuPool::new(1);
+        next_command(
+            &creator,
+            Ok(MockChild::new(exit_status(0), "nvcc\nfoo", "")),
+        );
+        let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &pool, None)
+            .wait()
+            .unwrap()
+            .0;
+        assert_eq!(CompilerKind::C(CCompilerKind::NVCC), c.kind());
     }
 
     #[test]
@@ -1270,9 +1231,10 @@ LLVM version: 6.0",
         next_command(&creator, Ok(MockChild::new(exit_status(0), &sysroot, "")));
         next_command(&creator, Ok(MockChild::new(exit_status(0), &sysroot, "")));
         next_command(&creator, Ok(MockChild::new(exit_status(0), &sysroot, "")));
-        let c = detect_compiler(creator, &rustc, f.tempdir.path(),&[], &pool, None)
+        let c = detect_compiler(creator, &rustc, f.tempdir.path(), &[], &pool, None)
             .wait()
-            .unwrap().0;
+            .unwrap()
+            .0;
         assert_eq!(CompilerKind::Rust, c.kind());
     }
 
@@ -1287,7 +1249,8 @@ LLVM version: 6.0",
         );
         let c = detect_compiler(creator, &f.bins[0], f.tempdir.path(), &[], &pool, None)
             .wait()
-            .unwrap().0;
+            .unwrap()
+            .0;
         assert_eq!(CompilerKind::C(CCompilerKind::Diab), c.kind());
     }
 
@@ -1300,11 +1263,16 @@ LLVM version: 6.0",
             &creator,
             Ok(MockChild::new(exit_status(0), "something", "")),
         );
-        assert!(
-            detect_compiler(creator, "/foo/bar".as_ref(),f.tempdir.path(), &[], &pool, None)
-                .wait()
-                .is_err()
-        );
+        assert!(detect_compiler(
+            creator,
+            "/foo/bar".as_ref(),
+            f.tempdir.path(),
+            &[],
+            &pool,
+            None
+        )
+        .wait()
+        .is_err());
     }
 
     #[test]
@@ -1313,11 +1281,16 @@ LLVM version: 6.0",
         let creator = new_creator();
         let pool = CpuPool::new(1);
         next_command(&creator, Ok(MockChild::new(exit_status(1), "", "")));
-        assert!(
-            detect_compiler(creator, "/foo/bar".as_ref(), f.tempdir.path(), &[], &pool, None)
-                .wait()
-                .is_err()
-        );
+        assert!(detect_compiler(
+            creator,
+            "/foo/bar".as_ref(),
+            f.tempdir.path(),
+            &[],
+            &pool,
+            None
+        )
+        .wait()
+        .is_err());
     }
 
     #[test]
@@ -1329,7 +1302,8 @@ LLVM version: 6.0",
         next_command(&creator, Ok(MockChild::new(exit_status(0), "gcc", "")));
         let c = get_compiler_info(creator, &f.bins[0], f.tempdir.path(), &[], &pool, None)
             .wait()
-            .unwrap().0;
+            .unwrap()
+            .0;
         // digest of an empty file.
         assert_eq!(CompilerKind::C(CCompilerKind::GCC), c.kind());
     }
@@ -1345,9 +1319,17 @@ LLVM version: 6.0",
         let storage: Arc<dyn Storage> = Arc::new(storage);
         // Pretend to be GCC.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "gcc", "")));
-        let c = get_compiler_info(creator.clone(), &f.bins[0], f.tempdir.path(), &[], &pool, None)
-            .wait()
-            .unwrap().0;
+        let c = get_compiler_info(
+            creator.clone(),
+            &f.bins[0],
+            f.tempdir.path(),
+            &[],
+            &pool,
+            None,
+        )
+        .wait()
+        .unwrap()
+        .0;
         // The preprocessor invocation.
         next_command(
             &creator,
@@ -1449,9 +1431,17 @@ LLVM version: 6.0",
         let storage: Arc<dyn Storage> = Arc::new(storage);
         // Pretend to be GCC.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "gcc", "")));
-        let c = get_compiler_info(creator.clone(), &f.bins[0], f.tempdir.path(), &[], &pool, None)
-            .wait()
-            .unwrap().0;
+        let c = get_compiler_info(
+            creator.clone(),
+            &f.bins[0],
+            f.tempdir.path(),
+            &[],
+            &pool,
+            None,
+        )
+        .wait()
+        .unwrap()
+        .0;
         // The preprocessor invocation.
         next_command(
             &creator,
@@ -1549,9 +1539,17 @@ LLVM version: 6.0",
         let storage: Arc<MockStorage> = Arc::new(storage);
         // Pretend to be GCC.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "gcc", "")));
-        let c = get_compiler_info(creator.clone(), &f.bins[0], f.tempdir.path(), &[], &pool, None)
-            .wait()
-            .unwrap().0;
+        let c = get_compiler_info(
+            creator.clone(),
+            &f.bins[0],
+            f.tempdir.path(),
+            &[],
+            &pool,
+            None,
+        )
+        .wait()
+        .unwrap()
+        .0;
         // The preprocessor invocation.
         next_command(
             &creator,
@@ -1623,9 +1621,17 @@ LLVM version: 6.0",
         let storage: Arc<dyn Storage> = Arc::new(storage);
         // Pretend to be GCC.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "gcc", "")));
-        let c = get_compiler_info(creator.clone(), &f.bins[0], f.tempdir.path(), &[], &pool, None)
-            .wait()
-            .unwrap().0;
+        let c = get_compiler_info(
+            creator.clone(),
+            &f.bins[0],
+            f.tempdir.path(),
+            &[],
+            &pool,
+            None,
+        )
+        .wait()
+        .unwrap()
+        .0;
         const COMPILER_STDOUT: &[u8] = b"compiler stdout";
         const COMPILER_STDERR: &[u8] = b"compiler stderr";
         // The compiler should be invoked twice, since we're forcing
@@ -1736,9 +1742,17 @@ LLVM version: 6.0",
             f.write_all(b"file contents")?;
             Ok(MockChild::new(exit_status(0), "gcc", ""))
         });
-        let c = get_compiler_info(creator.clone(), &f.bins[0], f.tempdir.path(), &[], &pool, None)
-            .wait()
-            .unwrap().0;
+        let c = get_compiler_info(
+            creator.clone(),
+            &f.bins[0],
+            f.tempdir.path(),
+            &[],
+            &pool,
+            None,
+        )
+        .wait()
+        .unwrap()
+        .0;
         // We should now have a fake object file.
         assert_eq!(fs::metadata(&obj).is_ok(), true);
         // The preprocessor invocation.
@@ -1797,9 +1811,17 @@ LLVM version: 6.0",
         let storage: Arc<dyn Storage> = Arc::new(storage);
         // Pretend to be GCC.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "gcc", "")));
-        let c = get_compiler_info(creator.clone(), &f.bins[0], f.tempdir.path(), &[], &pool, None)
-            .wait()
-            .unwrap().0;
+        let c = get_compiler_info(
+            creator.clone(),
+            &f.bins[0],
+            f.tempdir.path(),
+            &[],
+            &pool,
+            None,
+        )
+        .wait()
+        .unwrap()
+        .0;
         const COMPILER_STDOUT: &[u8] = b"compiler stdout";
         const COMPILER_STDERR: &[u8] = b"compiler stderr";
         // The compiler should be invoked twice, since we're forcing

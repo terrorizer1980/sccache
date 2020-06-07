@@ -30,8 +30,8 @@ use crate::protocol::{Compile, CompileFinished, CompileResponse, Request, Respon
 use crate::util;
 use filetime::FileTime;
 use futures::sync::mpsc;
-use futures::task::{self, Task};
 use futures::{future, stream, Async, AsyncSink, Future, Poll, Sink, StartSend, Stream};
+use futures_03::compat::Compat;
 use futures_cpupool::CpuPool;
 use number_prefix::{binary_prefix, Prefixed, Standalone};
 use std::cell::RefCell;
@@ -44,11 +44,13 @@ use std::io::{self, Write};
 use std::mem;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::{ExitStatus, Output};
 use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(feature = "dist-client")]
 use std::sync::Mutex;
+use std::task::{Context, Waker};
 use std::time::Duration;
 use std::time::Instant;
 use std::u64;
@@ -190,7 +192,6 @@ impl DistClientContainer {
     fn new(config: &Config, pool: &CpuPool) -> Self {
         let config = DistClientConfig {
             pool: pool.clone(),
-
             scheduler_url: config.dist.scheduler_url.clone(),
             auth: config.dist.auth.clone(),
             cache_dir: config.dist.cache_dir.clone(),
@@ -321,9 +322,8 @@ impl DistClientContainer {
                 }
             }};
         }
-        // TODO: NLL would avoid this clone
-        match config.scheduler_url.clone() {
-            Some(addr) => {
+        match config.scheduler_url {
+            Some(ref addr) => {
                 let url = addr.to_url();
                 info!("Enabling distributed sccache to {}", url);
                 let auth_token = match &config.auth {
@@ -336,7 +336,6 @@ impl DistClientContainer {
                 let auth_token = try_or_fail_with_message!(auth_token.chain_err(|| {
                     "could not load client auth token, run |sccache --dist-auth|"
                 }));
-                // TODO: NLL would let us move this inside the previous match
                 let dist_client = dist::http::Client::new(
                     &config.pool,
                     url,
@@ -580,7 +579,7 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         // Note that we cap the amount of time this can take, however, as we
         // don't want to wait *too* long.
         runtime
-            .block_on(Timeout::new(wait, Duration::new(30, 0)))
+            .block_on(Timeout::new(Compat::new(wait), Duration::new(30, 0)))
             .map_err(|e| {
                 if e.is_inner() {
                     e.into_inner().unwrap()
@@ -595,23 +594,27 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
     }
 }
 
-
-type CompilerMap<C> =
-    HashMap<PathBuf, Option<CompilerCacheEntry<C>>>;
-
+type CompilerMap<C> = HashMap<PathBuf, Option<CompilerCacheEntry<C>>>;
 
 /// entry of the compiler cache
-struct CompilerCacheEntry<C : CommandCreatorSync> {
+struct CompilerCacheEntry<C: CommandCreatorSync> {
     /// compiler argument trait obj
-    pub compiler : Box<dyn Compiler<C>>,
+    pub compiler: Box<dyn Compiler<C>>,
     /// modification time of the compilers executable file
-    pub mtime : FileTime,
+    pub mtime: FileTime,
     /// distributed compilation extra info
-    pub dist_info : Option<(PathBuf, FileTime)>,
+    pub dist_info: Option<(PathBuf, FileTime)>,
 }
 
-impl<C> CompilerCacheEntry<C> where C: CommandCreatorSync {
-    fn new(compiler : Box<dyn Compiler<C>>, mtime : FileTime, dist_info : Option<(PathBuf, FileTime)>) -> Self {
+impl<C> CompilerCacheEntry<C>
+where
+    C: CommandCreatorSync,
+{
+    fn new(
+        compiler: Box<dyn Compiler<C>>,
+        mtime: FileTime,
+        dist_info: Option<(PathBuf, FileTime)>,
+    ) -> Self {
         Self {
             compiler,
             mtime,
@@ -639,13 +642,7 @@ struct SccacheService<C: CommandCreatorSync> {
     /// (usually file or current working directory)
     /// the associated `FileTime` is the modification time of
     /// the compiler proxy, in order to track updates of the proxy itself
-    compiler_proxies: Rc<
-        RefCell<
-            HashMap<
-                PathBuf, (Box<dyn CompilerProxy<C>>, FileTime)
-            >
-        >
-    >,
+    compiler_proxies: Rc<RefCell<HashMap<PathBuf, (Box<dyn CompilerProxy<C>>, FileTime)>>>,
 
     /// Thread pool to execute work in
     pool: CpuPool,
@@ -798,7 +795,7 @@ where
                             message,
                             body: true,
                         }))
-                        .chain(body.map(|chunk| Frame::Body { chunk: Some(chunk) }))
+                        .chain(Compat::new(body).map(|chunk| Frame::Body { chunk: Some(chunk) }))
                         .chain(stream::once(Ok(Frame::Body { chunk: None }))),
                     ),
                 };
@@ -854,8 +851,6 @@ where
         )
     }
 
-
-
     /// Look up compiler info from the cache for the compiler `path`.
     /// If not cached, determine the compiler type and cache the result.
     fn compiler_info(
@@ -873,7 +868,10 @@ where
 
         let path2 = path.clone();
         let path1 = path.clone();
-        let env = env.into_iter().cloned().collect::<Vec<(OsString,OsString)>>();
+        let env = env
+            .into_iter()
+            .cloned()
+            .collect::<Vec<(OsString, OsString)>>();
 
         let resolve_w_proxy = {
             let compiler_proxies_borrow = self.compiler_proxies.borrow();
@@ -884,68 +882,68 @@ where
                     cwd.clone(),
                     env.as_slice(),
                 );
-                Box::new(fut.then(|res : Result<_>| { Ok(res.ok()) }))
+                Box::new(fut.then(|res: Result<_>| Ok(res.ok())))
             } else {
                 f_ok(None)
             }
         };
 
         // use the supplied compiler path as fallback, lookup its modification time too
-        let w_fallback = resolve_w_proxy
-            .then(move |res: Result<Option<(PathBuf, FileTime)>>| {
-                let opt = match res {
-                    Ok(Some(x)) => Some(x), // TODO resolve the path right away
-                    _ => {
-                        // fallback to using the path directly
-                        metadata(&path2)
+        let w_fallback = resolve_w_proxy.then(move |res: Result<Option<(PathBuf, FileTime)>>| {
+            let opt = match res {
+                Ok(Some(x)) => Some(x), // TODO resolve the path right away
+                _ => {
+                    // fallback to using the path directly
+                    metadata(&path2)
                         .map(|attr| FileTime::from_last_modification_time(&attr))
                         .ok()
-                        .map(move |filetime| {
-                            (path2.clone(),filetime)
-                        })
-                    }
-                };
-                f_ok(opt)
-            });
+                        .map(move |filetime| (path2.clone(), filetime))
+                }
+            };
+            f_ok(opt)
+        });
 
-        let lookup_compiler =
-            w_fallback.and_then(move |opt : Option<(PathBuf, FileTime)>| {
-                let (resolved_compiler_path, mtime)
-                    = opt.expect("Must contain sane data, otherwise mtime is not avail");
+        let lookup_compiler = w_fallback.and_then(move |opt: Option<(PathBuf, FileTime)>| {
+            let (resolved_compiler_path, mtime) =
+                opt.expect("Must contain sane data, otherwise mtime is not avail");
 
-
-                let dist_info = match me1.dist_client.get_client() {
-                    Ok(Some(ref client)) => {
-                        if let Some(archive) = client.get_custom_toolchain(&resolved_compiler_path) {
-                            match metadata(&archive)
-                                .map(|attr| FileTime::from_last_modification_time(&attr))
-                            {
-                                Ok(mtime) => Some((archive, mtime)),
-                                _ => None,
-                            }
-                        } else {
-                            None
+            let dist_info = match me1.dist_client.get_client() {
+                Ok(Some(ref client)) => {
+                    if let Some(archive) = client.get_custom_toolchain(&resolved_compiler_path) {
+                        match metadata(&archive)
+                            .map(|attr| FileTime::from_last_modification_time(&attr))
+                        {
+                            Ok(mtime) => Some((archive, mtime)),
+                            _ => None,
                         }
+                    } else {
+                        None
                     }
-                    _ => None,
-                };
+                }
+                _ => None,
+            };
 
-                let opt = match me1.compilers.borrow().get(&resolved_compiler_path) {
-                    // It's a hit only if the mtime and dist archive data matches.
-                    Some(&Some(ref entry)) => {
-                        if entry.mtime == mtime && entry.dist_info == dist_info {
-                            Some(entry.compiler.clone())
-                        } else {
-                            None
-                        }
+            let opt = match me1.compilers.borrow().get(&resolved_compiler_path) {
+                // It's a hit only if the mtime and dist archive data matches.
+                Some(&Some(ref entry)) => {
+                    if entry.mtime == mtime && entry.dist_info == dist_info {
+                        Some(entry.compiler.clone())
+                    } else {
+                        None
                     }
-                    _ => None,
-                };
-                f_ok((resolved_compiler_path, mtime, opt, dist_info))
-            });
+                }
+                _ => None,
+            };
+            f_ok((resolved_compiler_path, mtime, opt, dist_info))
+        });
 
-        let obtain =
-            lookup_compiler.and_then(move |(resolved_compiler_path, mtime, opt, dist_info) : (PathBuf, FileTime, Option<Box<dyn Compiler<C>>>, Option<(PathBuf,FileTime)> )| {
+        let obtain = lookup_compiler.and_then(
+            move |(resolved_compiler_path, mtime, opt, dist_info): (
+                PathBuf,
+                FileTime,
+                Option<Box<dyn Compiler<C>>>,
+                Option<(PathBuf, FileTime)>,
+            )| {
                 match opt {
                     Some(info) => {
                         trace!("compiler_info cache hit");
@@ -968,43 +966,59 @@ where
                             dist_info.clone().map(|(p, _)| p),
                         );
 
-                        Box::new(
-                        x.then(move |info: Result<(Box<dyn Compiler<C>>,Option<Box<dyn CompilerProxy<C>>>)>| {
-                            match info {
-                                Ok((ref c, ref proxy)) => {
-                                    // register the proxy for this compiler, so it will be used directly from now on
-                                    // and the true/resolved compiler will create table hits in the hash map
-                                    // based on the resolved path
-                                    if let Some(proxy) = proxy {
-                                        trace!("Inserting new path proxy {:?} @ {:?} -> {:?}", &path, &cwd, resolved_compiler_path);
-                                        let proxy : Box<dyn CompilerProxy<C>> =  proxy.box_clone();
-                                        me.compiler_proxies.borrow_mut().insert(path, (proxy, mtime.clone()));
-                                    }
-                                    // TODO add some safety checks in case a proxy exists, that the initial `path` is not
-                                    // TODO the same as the resolved compiler binary
+                        Box::new(x.then(
+                            move |info: Result<(
+                                Box<dyn Compiler<C>>,
+                                Option<Box<dyn CompilerProxy<C>>>,
+                            )>| {
+                                match info {
+                                    Ok((ref c, ref proxy)) => {
+                                        // register the proxy for this compiler, so it will be used directly from now on
+                                        // and the true/resolved compiler will create table hits in the hash map
+                                        // based on the resolved path
+                                        if let Some(proxy) = proxy {
+                                            trace!(
+                                                "Inserting new path proxy {:?} @ {:?} -> {:?}",
+                                                &path,
+                                                &cwd,
+                                                resolved_compiler_path
+                                            );
+                                            let proxy: Box<dyn CompilerProxy<C>> =
+                                                proxy.box_clone();
+                                            me.compiler_proxies
+                                                .borrow_mut()
+                                                .insert(path, (proxy, mtime.clone()));
+                                        }
+                                        // TODO add some safety checks in case a proxy exists, that the initial `path` is not
+                                        // TODO the same as the resolved compiler binary
 
-                                    // cache
-                                    let map_info = CompilerCacheEntry::new(c.clone(), mtime, dist_info);
-                                    trace!("Inserting POSSIBLY PROXIED cache map info for {:?}", &resolved_compiler_path);
-                                    me.compilers.borrow_mut().insert(resolved_compiler_path, Some(map_info));
-                                },
-                                Err(_) => {
-                                    trace!("Inserting PLAIN cache map info for {:?}", &path);
-                                    me.compilers.borrow_mut().insert(path, None);
+                                        // cache
+                                        let map_info =
+                                            CompilerCacheEntry::new(c.clone(), mtime, dist_info);
+                                        trace!(
+                                            "Inserting POSSIBLY PROXIED cache map info for {:?}",
+                                            &resolved_compiler_path
+                                        );
+                                        me.compilers
+                                            .borrow_mut()
+                                            .insert(resolved_compiler_path, Some(map_info));
+                                    }
+                                    Err(_) => {
+                                        trace!("Inserting PLAIN cache map info for {:?}", &path);
+                                        me.compilers.borrow_mut().insert(path, None);
+                                    }
                                 }
-                            }
-                            // drop the proxy information, response is compiler only
-                            let r : Result<Box<dyn Compiler<C>>> = info.map(|info| info.0);
-                            f_ok(r)
-                        }))
+                                // drop the proxy information, response is compiler only
+                                let r: Result<Box<dyn Compiler<C>>> = info.map(|info| info.0);
+                                f_ok(r)
+                            },
+                        ))
                     }
                 }
-
-            });
-
+            },
+        );
 
         return Box::new(obtain);
-
     }
 
     /// Check that we can handle and cache `cmd` when run with `compiler`.
@@ -1182,10 +1196,10 @@ where
                     error!("[{:?}] fatal error: {}", out_pretty, err);
 
                     let mut error = "sccache: encountered fatal error\n".to_string();
-                    let _ = writeln!(error, "sccache: error : {}", err);
+                    let _ = writeln!(error, "sccache: error: {}", err);
                     for e in err.iter() {
                         error!("[{:?}] \t{}", out_pretty, e);
-                        let _ = writeln!(error, "sccache:  cause: {}", e);
+                        let _ = writeln!(error, "sccache: caused by: {}", e);
                     }
                     stats.cache_errors.increment(&kind);
                     //TODO: figure out a better way to communicate this?
@@ -1235,11 +1249,8 @@ pub struct PerLanguageCount {
 impl PerLanguageCount {
     fn increment(&mut self, kind: &CompilerKind) {
         let key = kind.lang_kind();
-        let count = match self.counts.get(&key) {
-            Some(v) => v + 1,
-            None => 1,
-        };
-        self.counts.insert(key, count);
+        let count = self.counts.entry(key).or_insert(0);
+        *count += 1;
     }
 
     pub fn all(&self) -> u64 {
@@ -1544,15 +1555,15 @@ impl<R> Body<R> {
     }
 }
 
-impl<R> Stream for Body<R> {
-    type Item = R;
-    type Error = Error;
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        match self.receiver.poll().unwrap() {
-            Async::Ready(Some(Ok(item))) => Ok(Async::Ready(Some(item))),
-            Async::Ready(Some(Err(err))) => Err(err),
-            Async::Ready(None) => Ok(Async::Ready(None)),
-            Async::NotReady => Ok(Async::NotReady),
+impl<R> futures_03::Stream for Body<R> {
+    type Item = Result<R>;
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.receiver).poll().unwrap() {
+            Async::Ready(item) => std::task::Poll::Ready(item),
+            Async::NotReady => std::task::Poll::Pending,
         }
     }
 }
@@ -1680,14 +1691,14 @@ struct ActiveInfo {
 
 struct Info {
     active: usize,
-    blocker: Option<Task>,
+    waker: Option<Waker>,
 }
 
 impl WaitUntilZero {
     fn new() -> (WaitUntilZero, ActiveInfo) {
         let info = Rc::new(RefCell::new(Info {
             active: 1,
-            blocker: None,
+            waker: None,
         }));
 
         (WaitUntilZero { info: info.clone() }, ActiveInfo { info })
@@ -1708,24 +1719,23 @@ impl Drop for ActiveInfo {
         let mut info = self.info.borrow_mut();
         info.active -= 1;
         if info.active == 0 {
-            if let Some(task) = info.blocker.take() {
-                task.notify();
+            if let Some(waker) = info.waker.take() {
+                waker.wake();
             }
         }
     }
 }
 
-impl Future for WaitUntilZero {
-    type Item = ();
-    type Error = io::Error;
+impl std::future::Future for WaitUntilZero {
+    type Output = io::Result<()>;
 
-    fn poll(&mut self) -> Poll<(), io::Error> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> std::task::Poll<Self::Output> {
         let mut info = self.info.borrow_mut();
         if info.active == 0 {
-            Ok(().into())
+            std::task::Poll::Ready(Ok(()))
         } else {
-            info.blocker = Some(task::current());
-            Ok(Async::NotReady)
+            info.waker = Some(cx.waker().clone());
+            std::task::Poll::Pending
         }
     }
 }
