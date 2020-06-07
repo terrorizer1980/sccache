@@ -19,7 +19,7 @@ use crate::compiler::{
 };
 use crate::dist;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::{run_input_output, OsStrExt};
+use crate::util::run_input_output;
 use futures::future::Future;
 use futures_cpupool::CpuPool;
 use local_encoding::{Encoder, Encoding};
@@ -216,43 +216,218 @@ ArgData! {
     TooHardPath(PathBuf),
     PreprocessorArgument(OsString),
     PreprocessorArgumentPath(PathBuf),
+    SuppressCompilation,
     DoCompilation,
     ShowIncludes,
     Output(PathBuf),
     DepFile(PathBuf),
     ProgramDatabase(PathBuf),
     DebugInfo,
+    PassThrough, // Miscellaneous flags that don't prevent caching.
+    PassThroughWithPath(PathBuf), // As above, recognised by prefix.
+    PassThroughWithSuffix(OsString), // As above, recognised by prefix.
     XClang(OsString),
 }
 
 use self::ArgData::*;
 
-counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
-    take_arg!("-D", OsString, Concatenated, PreprocessorArgument),
-    take_arg!("-FA", OsString, Concatenated, TooHard),
-    take_arg!("-FI", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
-    take_arg!("-FR", PathBuf, Concatenated, TooHardPath),
-    take_arg!("-Fa", PathBuf, Concatenated, TooHardPath),
-    take_arg!("-Fd", PathBuf, Concatenated, ProgramDatabase),
-    take_arg!("-Fe", PathBuf, Concatenated, TooHardPath),
-    take_arg!("-Fi", PathBuf, Concatenated, TooHardPath),
-    take_arg!("-Fm", PathBuf, Concatenated, TooHardPath),
-    take_arg!("-Fo", PathBuf, Concatenated, Output),
-    take_arg!("-Fp", PathBuf, Concatenated, TooHardPath),
-    take_arg!("-Fr", PathBuf, Concatenated, TooHardPath),
-    flag!("-Fx", TooHardFlag),
-    take_arg!("-I", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
-    take_arg!("-U", OsString, Concatenated, PreprocessorArgument),
-    take_arg!("-Xclang", OsString, Separated, XClang),
-    flag!("-Zi", DebugInfo),
-    flag!("-ZI", DebugInfo),
-    flag!("-c", DoCompilation),
-    take_arg!("-deps", PathBuf, Concatenated, DepFile),
-    flag!("-fsyntax-only", TooHardFlag),
-    take_arg!("-o", PathBuf, Separated, Output), // Deprecated but valid
-    flag!("-showIncludes", ShowIncludes),
+macro_rules! msvc_args {
+    (static ARGS: [$t:ty; _] = [$($macro:ident ! ($($v:tt)*),)*]) => {
+        counted_array!(static ARGS: [$t; _] = [$(msvc_args!(@one "-", $macro!($($v)*)),)*]);
+        counted_array!(static SLASH_ARGS: [$t; _] = [$(msvc_args!(@one "/", $macro!($($v)*)),)*]);
+    };
+    (@one $prefix:expr, msvc_take_arg!($s:expr, $($t:tt)*)) => {
+        take_arg!(concat!($prefix, $s), $($t)+)
+    };
+    (@one $prefix:expr, msvc_flag!($s:expr, $($t:tt)+)) => {
+        flag!(concat!($prefix, $s), $($t)+)
+    };
+    (@one $prefix:expr, $other:expr) => { $other };
+}
+
+// Reference:
+// https://docs.microsoft.com/en-us/cpp/build/reference/compiler-options-listed-alphabetically?view=vs-2019
+msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
+    msvc_flag!("?", SuppressCompilation),
+    msvc_flag!("C", PassThrough), // Ignored unless a preprocess-only flag is specified.
+    msvc_take_arg!("D", OsString, Concatenated, PreprocessorArgument),
+    msvc_flag!("E", SuppressCompilation),
+    msvc_take_arg!("EH", OsString, Concatenated, PassThroughWithSuffix), // /EH[acsr\-]+ - TODO: use a regex?
+    msvc_flag!("EP", SuppressCompilation),
+    msvc_take_arg!("F", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("FA", OsString, Concatenated, TooHard),
+    msvc_flag!("FC", TooHardFlag), // Use absolute paths in error messages.
+    msvc_take_arg!("FI", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
+    msvc_take_arg!("FR", PathBuf, Concatenated, TooHardPath),
+    msvc_flag!("FS", TooHardFlag),
+    msvc_take_arg!("FU", PathBuf, CanBeSeparated, TooHardPath),
+    msvc_take_arg!("Fa", PathBuf, Concatenated, TooHardPath),
+    msvc_take_arg!("Fd", PathBuf, Concatenated, ProgramDatabase),
+    msvc_take_arg!("Fe", PathBuf, Concatenated, TooHardPath),
+    msvc_take_arg!("Fi", PathBuf, Concatenated, TooHardPath),
+    msvc_take_arg!("Fm", PathBuf, Concatenated, PassThroughWithPath), // No effect if /c is specified.
+    msvc_take_arg!("Fo", PathBuf, Concatenated, Output),
+    msvc_take_arg!("Fp", PathBuf, Concatenated, TooHardPath),
+    msvc_take_arg!("Fr", PathBuf, Concatenated, TooHardPath),
+    msvc_flag!("Fx", TooHardFlag),
+    msvc_flag!("GA", PassThrough),
+    msvc_flag!("GF", PassThrough),
+    msvc_flag!("GH", PassThrough),
+    msvc_flag!("GL", PassThrough),
+    msvc_flag!("GL-", PassThrough),
+    msvc_flag!("GR", PassThrough),
+    msvc_flag!("GR-", PassThrough),
+    msvc_flag!("GS", PassThrough),
+    msvc_flag!("GS-", PassThrough),
+    msvc_flag!("GT", PassThrough),
+    msvc_flag!("GX", PassThrough),
+    msvc_flag!("GZ", PassThrough),
+    msvc_flag!("Gd", PassThrough),
+    msvc_flag!("Ge", PassThrough),
+    msvc_flag!("Gh", PassThrough),
+    msvc_flag!("Gm", TooHardFlag),
+    msvc_flag!("Gr", PassThrough),
+    msvc_take_arg!("Gs", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("Gv", PassThrough),
+    msvc_flag!("Gw", PassThrough),
+    msvc_flag!("Gw-", PassThrough),
+    msvc_flag!("Gy", PassThrough),
+    msvc_flag!("Gy-", PassThrough),
+    msvc_flag!("Gz", PassThrough),
+    msvc_take_arg!("H", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("HELP", SuppressCompilation),
+    msvc_take_arg!("I", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
+    msvc_flag!("J", PassThrough),
+    msvc_flag!("JMC", PassThrough),
+    msvc_flag!("JMC-", PassThrough),
+    msvc_flag!("LD", PassThrough),
+    msvc_flag!("LDd", PassThrough),
+    msvc_flag!("MD", PassThrough),
+    msvc_flag!("MDd", PassThrough),
+    msvc_flag!("MP", TooHardFlag), // Multiple source files.
+    msvc_flag!("MT", PassThrough),
+    msvc_flag!("MTd", PassThrough),
+    msvc_flag!("O1", PassThrough),
+    msvc_flag!("O2", PassThrough),
+    msvc_flag!("Ob0", PassThrough),
+    msvc_flag!("Ob1", PassThrough),
+    msvc_flag!("Ob2", PassThrough),
+    msvc_flag!("Ob3", PassThrough),
+    msvc_flag!("Od", PassThrough),
+    msvc_flag!("Og", PassThrough),
+    msvc_flag!("Oi", PassThrough),
+    msvc_flag!("Oi-", PassThrough),
+    msvc_flag!("Os", PassThrough),
+    msvc_flag!("Ot", PassThrough),
+    msvc_flag!("Ox", PassThrough),
+    msvc_flag!("Oy", PassThrough),
+    msvc_flag!("Oy-", PassThrough),
+    msvc_flag!("P", SuppressCompilation),
+    msvc_flag!("QIfist", PassThrough),
+    msvc_flag!("QIntel-jcc-erratum", PassThrough),
+    msvc_flag!("Qfast_transcendentals", PassThrough),
+    msvc_flag!("Qimprecise_fwaits", PassThrough),
+    msvc_flag!("Qpar", PassThrough),
+    msvc_flag!("Qsafe_fp_loads", PassThrough),
+    msvc_flag!("Qspectre", PassThrough),
+    msvc_flag!("Qspectre-load", PassThrough),
+    msvc_flag!("Qspectre-load-cf", PassThrough),
+    msvc_flag!("Qvec-report:1", PassThrough),
+    msvc_flag!("Qvec-report:2", PassThrough),
+    msvc_take_arg!("RTC", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("TC", PassThrough), // TODO: disable explicit language check, hope for the best for now? Also, handle /Tc & /Tp.
+    msvc_flag!("TP", PassThrough), // As above.
+    msvc_take_arg!("U", OsString, Concatenated, PreprocessorArgument),
+    msvc_take_arg!("V", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("W0", PassThrough),
+    msvc_flag!("W1", PassThrough),
+    msvc_flag!("W2", PassThrough),
+    msvc_flag!("W3", PassThrough),
+    msvc_flag!("W4", PassThrough),
+    msvc_flag!("WL", PassThrough),
+    msvc_flag!("WX", PassThrough),
+    msvc_flag!("Wall", PassThrough),
+    msvc_take_arg!("Wv:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("X", PassThrough),
+    msvc_take_arg!("Xclang", OsString, Separated, XClang),
+    msvc_flag!("Yd", PassThrough),
+    msvc_flag!("Z7", PassThrough), // Add debug info to .obj files.
+    msvc_flag!("ZI", DebugInfo), // Implies /FC, which puts absolute paths in error messages -> TooHardFlag?
+    msvc_flag!("ZW", PassThrough),
+    msvc_flag!("Za", PassThrough),
+    msvc_take_arg!("Zc:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("Ze", PassThrough),
+    msvc_flag!("Zi", DebugInfo),
+    msvc_flag!("Zo", PassThrough),
+    msvc_flag!("Zo-", PassThrough),
+    msvc_flag!("Zp1", PassThrough),
+    msvc_flag!("Zp16", PassThrough),
+    msvc_flag!("Zp2", PassThrough),
+    msvc_flag!("Zp4", PassThrough),
+    msvc_flag!("Zp8", PassThrough),
+    msvc_flag!("Zs", SuppressCompilation),
+    msvc_flag!("analyze-", PassThrough),
+    msvc_take_arg!("analyze:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("arch:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("await", PassThrough),
+    msvc_flag!("bigobj", PassThrough),
+    msvc_flag!("c", DoCompilation),
+    msvc_take_arg!("cgthreads", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("clr", PassThrough),
+    msvc_take_arg!("clr:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("constexpr:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("deps", PathBuf, Concatenated, DepFile),
+    msvc_take_arg!("diagnostics:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("doc", PathBuf, Concatenated, TooHardPath), // Creates an .xdc file.
+    msvc_take_arg!("errorReport:", OsString, Concatenated, PassThroughWithSuffix), // Deprecated.
+    msvc_take_arg!("execution-charset:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("experimental:module", TooHardFlag),
+    msvc_flag!("experimental:module-", PassThrough), // Explicitly disabled modules.
+    msvc_take_arg!("experimental:preprocessor", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("favor:", OsString, Separated, PassThroughWithSuffix),
+    msvc_take_arg!("fp:", OsString, Separated, PassThroughWithSuffix),
+    msvc_flag!("fsyntax-only", SuppressCompilation),
+    msvc_take_arg!("guard:cf", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("homeparams", PassThrough),
+    msvc_flag!("hotpatch", PassThrough),
+    msvc_flag!("kernel", PassThrough),
+    msvc_flag!("kernel-", PassThrough),
+    msvc_flag!("nologo", PassThrough),
+    msvc_take_arg!("o", PathBuf, Separated, Output), // Deprecated but valid
+    msvc_flag!("openmp", PassThrough),
+    msvc_flag!("openmp:experimental", PassThrough),
+    msvc_flag!("permissive-", PassThrough),
+    msvc_flag!("sdl", PassThrough),
+    msvc_flag!("sdl-", PassThrough),
+    msvc_flag!("showIncludes", ShowIncludes),
+    msvc_take_arg!("source-charset:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("std:", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_flag!("u", PassThrough),
+    msvc_flag!("utf-8", PassThrough),
+    msvc_flag!("validate-charset", PassThrough),
+    msvc_flag!("validate-charset-", PassThrough),
+    msvc_flag!("vd0", PassThrough),
+    msvc_flag!("vd1", PassThrough),
+    msvc_flag!("vd2", PassThrough),
+    msvc_flag!("vmb", PassThrough),
+    msvc_flag!("vmg", PassThrough),
+    msvc_flag!("vmm", PassThrough),
+    msvc_flag!("vms", PassThrough),
+    msvc_flag!("vmv", PassThrough),
+    msvc_flag!("volatile:iso", PassThrough),
+    msvc_flag!("volatile:ms", PassThrough),
+    msvc_flag!("w", PassThrough),
+    msvc_take_arg!("w1", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("w2", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("w3", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("w4", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("wd", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("we", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("wo", OsString, Concatenated, PassThroughWithSuffix),
     take_arg!("@", PathBuf, Concatenated, TooHardPath),
 ]);
+
+// TODO: what do do with precompiled header flags? eg: /Y-, /Yc, /YI, /Yu, /Zf, /ZH, /Zm
 
 pub fn parse_arguments(
     arguments: &[OsString],
@@ -263,32 +438,28 @@ pub fn parse_arguments(
     let mut input_arg = None;
     let mut common_args = vec![];
     let mut preprocessor_args = vec![];
+    let mut dependency_args = vec![];
     let mut extra_hash_files = vec![];
     let mut compilation = false;
+    let mut compilation_flag = OsString::new();
     let mut debug_info = false;
     let mut pdb = None;
     let mut depfile = None;
     let mut show_includes = false;
     let mut xclangs: Vec<OsString> = vec![];
 
-    // First convert all `/foo` arguments to `-foo` to accept both styles
-    let it = arguments.iter().map(|i| {
-        if let Some(arg) = i.split_prefix("/") {
-            let mut dash = OsString::from("-");
-            dash.push(&arg);
-            dash
-        } else {
-            i.clone()
-        }
-    });
-
-    for arg in ArgsIter::new(it, &ARGS[..]) {
+    for arg in ArgsIter::new(arguments.iter().cloned(), (&ARGS[..], &SLASH_ARGS[..])) {
         let arg = try_or_cannot_cache!(arg, "argument parse");
         match arg.get_data() {
+            Some(PassThrough) | Some(PassThroughWithPath(_)) | Some(PassThroughWithSuffix(_)) => {}
             Some(TooHardFlag) | Some(TooHard(_)) | Some(TooHardPath(_)) => {
                 cannot_cache!(arg.flag_str().expect("Can't be Argument::Raw/UnknownFlag",))
             }
-            Some(DoCompilation) => compilation = true,
+            Some(DoCompilation) => {
+                compilation = true;
+                compilation_flag =
+                    OsString::from(arg.flag_str().expect("Compilation flag expected"));
+            }
             Some(ShowIncludes) => show_includes = true,
             Some(Output(out)) => {
                 output_arg = Some(out.clone());
@@ -302,6 +473,9 @@ pub fn parse_arguments(
             Some(ProgramDatabase(p)) => pdb = Some(p.clone()),
             Some(DebugInfo) => debug_info = true,
             Some(PreprocessorArgument(_)) | Some(PreprocessorArgumentPath(_)) => {}
+            Some(SuppressCompilation) => {
+                return CompilerArguments::NotCompilation;
+            }
             Some(XClang(s)) => xclangs.push(s.clone()),
             None => {
                 match arg {
@@ -365,9 +539,10 @@ pub fn parse_arguments(
             }
             Some(PreprocessorArgumentFlag)
             | Some(PreprocessorArgument(_))
-            | Some(PreprocessorArgumentPath(_))
-            | Some(DepTarget(_))
-            | Some(NeedDepTarget) => &mut preprocessor_args,
+            | Some(PreprocessorArgumentPath(_)) => &mut preprocessor_args,
+            Some(DepArgumentPath(_)) | Some(DepTarget(_)) | Some(NeedDepTarget) => {
+                &mut dependency_args
+            }
         };
         // Normalize attributes such as "-I foo", "-D FOO=bar", as
         // "-Ifoo", "-DFOO=bar", etc. and "-includefoo", "idirafterbar" as
@@ -421,8 +596,10 @@ pub fn parse_arguments(
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
         language,
+        compilation_flag,
         depfile,
         outputs,
+        dependency_args,
         preprocessor_args,
         common_args,
         extra_hash_files,
@@ -489,6 +666,7 @@ where
         .arg(&parsed_args.input)
         .arg("-nologo")
         .args(&parsed_args.preprocessor_args)
+        .args(&parsed_args.dependency_args)
         .args(&parsed_args.common_args)
         .env_clear()
         .envs(env_vars.iter().map(|&(ref k, ref v)| (k, v)))
@@ -599,7 +777,11 @@ fn generate_compile_commands(
     let mut fo = OsString::from("-Fo");
     fo.push(&out_file);
 
-    let mut arguments: Vec<OsString> = vec!["-c".into(), parsed_args.input.clone().into(), fo];
+    let mut arguments: Vec<OsString> = vec![
+        parsed_args.compilation_flag.clone(),
+        parsed_args.input.clone().into(),
+        fo,
+    ];
     arguments.extend(parsed_args.preprocessor_args.clone());
     arguments.extend(parsed_args.common_args.clone());
 
@@ -620,7 +802,7 @@ fn generate_compile_commands(
         fo.push_str(&path_transformer.as_dist(out_file)?);
 
         let mut arguments: Vec<String> = vec![
-            "-c".into(),
+            parsed_args.compilation_flag.clone().into_string().ok()?,
             path_transformer.as_dist(&parsed_args.input)?,
             fo,
         ];
@@ -686,6 +868,7 @@ mod test {
         let ParsedArguments {
             input,
             language,
+            compilation_flag,
             outputs,
             preprocessor_args,
             msvc_show_includes,
@@ -697,9 +880,33 @@ mod test {
         };
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
+        assert_eq!(Some("-c"), compilation_flag.to_str());
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
-        //TODO: fix assert_map_contains to assert no extra keys!
-        assert_eq!(1, outputs.len());
+        assert!(preprocessor_args.is_empty());
+        assert!(common_args.is_empty());
+        assert!(!msvc_show_includes);
+    }
+
+    #[test]
+    fn test_parse_compile_flag() {
+        let args = ovec!["/c", "foo.c", "-Fofoo.obj"];
+        let ParsedArguments {
+            input,
+            language,
+            compilation_flag,
+            outputs,
+            preprocessor_args,
+            msvc_show_includes,
+            common_args,
+            ..
+        } = match parse_arguments(args) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+        assert_eq!(Some("foo.c"), input.to_str());
+        assert_eq!(Language::C, language);
+        assert_eq!(Some("/c"), compilation_flag.to_str());
+        assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
         assert!(!msvc_show_includes);
@@ -723,8 +930,6 @@ mod test {
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
-        //TODO: fix assert_map_contains to assert no extra keys!
-        assert_eq!(1, outputs.len());
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
         assert!(!msvc_show_includes);
@@ -748,8 +953,6 @@ mod test {
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
-        //TODO: fix assert_map_contains to assert no extra keys!
-        assert_eq!(1, outputs.len());
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
         assert!(!msvc_show_includes);
@@ -773,8 +976,6 @@ mod test {
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
-        //TODO: fix assert_map_contains to assert no extra keys!
-        assert_eq!(1, outputs.len());
         assert!(preprocessor_args.is_empty());
         assert_eq!(common_args, ovec!["-foo", "-bar"]);
         assert!(!msvc_show_includes);
@@ -798,8 +999,6 @@ mod test {
         assert_eq!(Some("foo.c"), input.to_str());
         assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
-        //TODO: fix assert_map_contains to assert no extra keys!
-        assert_eq!(1, outputs.len());
         assert_eq!(preprocessor_args, ovec!["-FIfile"]);
         assert!(common_args.is_empty());
         assert!(msvc_show_includes);
@@ -827,8 +1026,6 @@ mod test {
             ("obj", PathBuf::from("foo.obj")),
             ("pdb", PathBuf::from("foo.pdb"))
         );
-        //TODO: fix assert_map_contains to assert no extra keys!
-        assert_eq!(2, outputs.len());
         assert!(preprocessor_args.is_empty());
         assert_eq!(common_args, ovec!["-Zi", "-Fdfoo.pdb"]);
         assert!(!msvc_show_includes);
@@ -904,8 +1101,10 @@ mod test {
         let parsed_args = ParsedArguments {
             input: "foo.c".into(),
             language: Language::C,
+            compilation_flag: "-c".into(),
             depfile: None,
             outputs: vec![("obj", "foo.obj".into())].into_iter().collect(),
+            dependency_args: vec![],
             preprocessor_args: vec![],
             common_args: vec![],
             extra_hash_files: vec![],
@@ -943,10 +1142,12 @@ mod test {
         let parsed_args = ParsedArguments {
             input: "foo.c".into(),
             language: Language::C,
+            compilation_flag: "/c".into(),
             depfile: None,
             outputs: vec![("obj", "foo.obj".into()), ("pdb", pdb)]
                 .into_iter()
                 .collect(),
+            dependency_args: vec![],
             preprocessor_args: vec![],
             common_args: vec![],
             extra_hash_files: vec![],

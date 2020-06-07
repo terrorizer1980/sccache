@@ -107,7 +107,7 @@ pub fn parse() -> Result<Command> {
     let mut args: Vec<_> = env::args_os().collect();
     if cfg!(windows) {
         if args.iter().any(|x| x == "/?") {
-            return Ok(Command::NoOp)
+            return Ok(Command::NoOp);
         }
     }
     if !internal_start_server {

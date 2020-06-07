@@ -150,8 +150,8 @@ fn run_server_process() -> Result<ServerStartup> {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
     use std::time::Duration;
-    use tokio_reactor::Handle;
     use tokio_named_pipes::NamedPipe;
+    use tokio_reactor::Handle;
     use uuid::Uuid;
     use winapi::shared::minwindef::{DWORD, FALSE, LPVOID, TRUE};
     use winapi::um::handleapi::CloseHandle;
@@ -166,7 +166,11 @@ fn run_server_process() -> Result<ServerStartup> {
     let mut runtime = Runtime::new()?;
     let pipe_name = format!(r"\\.\pipe\{}", Uuid::new_v4().to_simple_ref());
     let server = runtime.block_on(future::lazy(|| {
-        NamedPipe::new(&pipe_name, #[allow(deprecated)] &Handle::current())
+        NamedPipe::new(
+            &pipe_name,
+            #[allow(deprecated)]
+            &Handle::current(),
+        )
     }))?;
 
     // Connect a client to our server, and we'll wait below if it's still in
@@ -425,10 +429,10 @@ fn handle_compile_finished(
         trace!("compiler exited with status {}", ret);
         Ok(ret)
     } else if let Some(signal) = response.signal {
-        println!("Compiler killed by signal {}", signal);
+        println!("sccache: Compiler killed by signal {}", signal);
         Ok(-2)
     } else {
-        println!("Missing compiler exit status!");
+        println!("sccache: Missing compiler exit status!");
         Ok(-3)
     }
 }
@@ -466,7 +470,7 @@ where
                 Ok(_) => bail!("unexpected response from server"),
                 Err(Error(ErrorKind::Io(ref e), _)) if e.kind() == io::ErrorKind::UnexpectedEof => {
                     eprintln!(
-                        "warning: sccache server looks like it shut down \
+                        "sccache: warning: The server looks like it shut down \
                          unexpectedly, compiling locally instead"
                     );
                 }
@@ -499,7 +503,7 @@ where
 
     Ok(status.code().unwrap_or_else(|| {
         if let Some(sig) = status_signal(status) {
-            println!("Compile terminated by signal {}", sig);
+            println!("sccache: Compile terminated by signal {}", sig);
         }
         // Arbitrary.
         2
@@ -560,12 +564,12 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         }
         Command::StartServer => {
             trace!("Command::StartServer");
-            println!("Starting sccache server...");
+            println!("sccache: Starting the server...");
             let startup = run_server_process().chain_err(|| "failed to start server process")?;
             match startup {
                 ServerStartup::Ok { port } => {
                     if port != DEFAULT_PORT {
-                        println!("Listening on port {}", port);
+                        println!("sccache: Listening on port {}", port);
                     }
                 }
                 ServerStartup::TimedOut => bail!("Timed out waiting for server startup"),
@@ -663,7 +667,8 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             let out_file = File::create(out)?;
             let cwd = env::current_dir().expect("A current working dir should exist");
 
-            let compiler = compiler::get_compiler_info(creator, &executable, &cwd, &env, &pool, None);
+            let compiler =
+                compiler::get_compiler_info(creator, &executable, &cwd, &env, &pool, None);
             let packager = compiler.map(|c| c.0.get_toolchain_packager());
             let res = packager.and_then(|p| p.write_pkg(out_file));
             runtime.block_on(res)?

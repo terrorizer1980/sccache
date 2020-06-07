@@ -1,32 +1,19 @@
 #![allow(unused_imports,dead_code,unused_variables)]
 
-use crate::compiler::{
-    gcc,
-    Cacheable,
-    CompileCommand,
-    CompilerArguments,
-    write_temp_file,
-};
 use crate::compiler::args::*;
 use crate::compiler::c::{CCompilerImpl, CCompilerKind, Language, ParsedArguments};
 use crate::compiler::gcc::ArgData::*;
+use crate::compiler::{gcc, write_temp_file, Cacheable, CompileCommand, CompilerArguments};
 use crate::dist;
+use crate::mock_command::{CommandCreator, CommandCreatorSync, RunCommand};
+use crate::util::{run_input_output, OsStrExt};
 use futures::future::{self, Future};
 use futures_cpupool::CpuPool;
-use crate::mock_command::{
-    CommandCreator,
-    CommandCreatorSync,
-    RunCommand,
-};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{
-    self,
-    Write,
-};
+use std::io::{self, Write};
 use std::path::Path;
 use std::process;
-use crate::util::{run_input_output, OsStrExt};
 
 use crate::errors::*;
 
@@ -35,11 +22,14 @@ use crate::errors::*;
 pub struct HCC;
 
 impl CCompilerImpl for HCC {
-    fn kind(&self) -> CCompilerKind { CCompilerKind::HCC }
-    fn parse_arguments(&self,
-                       arguments: &[OsString],
-                       cwd: &Path) -> CompilerArguments<ParsedArguments>
-    {
+    fn kind(&self) -> CCompilerKind {
+        CCompilerKind::HCC
+    }
+    fn parse_arguments(
+        &self,
+        arguments: &[OsString],
+        cwd: &Path,
+    ) -> CompilerArguments<ParsedArguments> {
         gcc::parse_arguments(arguments, cwd, (&gcc::ARGS[..], &ARGS[..]))
     }
 

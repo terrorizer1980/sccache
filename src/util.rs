@@ -22,7 +22,6 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::hash::Hasher;
 use std::io::prelude::*;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::time;
@@ -52,13 +51,12 @@ impl Digest {
     }
 
     /// Calculate the BLAKE3 digest of the contents read from `reader`.
-    pub fn reader_sync<R: Read>(reader: R) -> Result<String> {
+    pub fn reader_sync<R: Read>(mut reader: R) -> Result<String> {
         let mut m = Digest::new();
-        let mut reader = BufReader::new(reader);
+        // A buffer of 128KB should give us the best performance.
+        // See https://eklitzke.org/efficient-file-copying-on-linux.
+        let mut buffer = [0; 128 * 1024];
         loop {
-            // A buffer of 128KB should give us the best performance.
-            // See https://eklitzke.org/efficient-file-copying-on-linux.
-            let mut buffer = [0; 128 * 1024];
             let count = reader.read(&mut buffer[..])?;
             if count == 0 {
                 break;
@@ -180,7 +178,10 @@ where
 ///
 /// If the command returns a non-successful exit status, an error of `ErrorKind::ProcessError`
 /// will be returned containing the process output.
-pub fn run_input_output<C>(mut command: C, input: Option<Vec<u8>>) -> SFuture<process::Output>
+pub fn run_input_output<C>(
+    mut command: C,
+    input: Option<Vec<u8>>,
+) -> impl Future<Item = process::Output, Error = Error>
 where
     C: RunCommand,
 {
@@ -195,7 +196,7 @@ where
         .stderr(Stdio::piped())
         .spawn();
 
-    Box::new(child.and_then(|child| {
+    child.and_then(|child| {
         wait_with_input_output(child, input).and_then(|output| {
             if output.status.success() {
                 f_ok(output)
@@ -203,7 +204,7 @@ where
                 f_err(ErrorKind::ProcessError(output))
             }
         })
-    }))
+    })
 }
 
 /// Write `data` to `writer` with bincode serialization, prefixed by a `u32` length.

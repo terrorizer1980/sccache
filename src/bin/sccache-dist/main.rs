@@ -101,18 +101,18 @@ fn main() {
             Ok(s) => s,
             Err(e) => {
                 let stderr = &mut std::io::stderr();
-                writeln!(stderr, "error: {}", e).unwrap();
+                writeln!(stderr, "sccache-dist: error: {}", e).unwrap();
 
                 for e in e.iter().skip(1) {
-                    writeln!(stderr, "caused by: {}", e).unwrap();
+                    writeln!(stderr, "sccache-dist: caused by: {}", e).unwrap();
                 }
                 2
             }
         },
         Err(e) => {
-            println!("sccache: {}", e);
+            println!("sccache-dist: {}", e);
             for e in e.iter().skip(1) {
-                println!("caused by: {}", e);
+                println!("sccache-dist: caused by: {}", e);
             }
             get_app().print_help().unwrap();
             println!("");
@@ -812,8 +812,7 @@ impl SchedulerIncoming for Scheduler {
         let mut servers = self.servers.lock().unwrap();
 
         if let btree_map::Entry::Occupied(mut entry) = jobs.entry(job_id) {
-            // TODO: nll should mean not needing to copy this out
-            let job_detail = *entry.get();
+            let job_detail = entry.get();
             if job_detail.server_id != server_id {
                 bail!(
                     "Job id {} is not registed on server {:?}",
